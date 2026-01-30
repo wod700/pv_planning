@@ -1,0 +1,10 @@
+locatie:
+  lat: 52.3489
+  lon: 5.3125
+
+openweather:
+  api_key: ""   # zet in Secret Manager / env var, niet in git
+
+kosten:
+  net_tarief_eur_per_kwh: 0.30
+  export_kost_eur_per_kwh: 0.00
