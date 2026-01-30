@@ -24,3 +24,9 @@ __pycache__/
 .venv/
 .env
 .streamlit/secrets.toml
+.vs/
+__pycache__/
+output/
+*.pyc
+service_account*.json
+*secret*
