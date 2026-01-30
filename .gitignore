@@ -30,3 +30,7 @@ output/
 *.pyc
 service_account*.json
 *secret*
+.vs/
+__pycache__/
+output/
+*.pyc
