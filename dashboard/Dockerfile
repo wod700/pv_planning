@@ -2,25 +2,21 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV MPLBACKEND=Agg \
-    PYTHONUNBUFFERED=1 \
-    PORT=8080
+ENV MPLBACKEND=Agg
+ENV PYTHONUNBUFFERED=1
 
-# Upgrade pip en installeer dependencies
+# (optioneel maar handig) pip up-to-date
 RUN pip install --no-cache-dir --upgrade pip
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy alle code
 COPY . .
 
-# Maak output map schrijfbaar (vaak nodig voor matplotlib cache / pandas temp files)
+# Maak output map schrijfbaar (handig voor archives / matplotlib cache)
 RUN mkdir -p output/archive && chmod -R 777 output
 
-# Expose Cloud Run poort
 EXPOSE 8080
 
-# Dynamische poort + bind op alle interfaces
-CMD ["sh","-c","streamlit run dashboard.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"]
-
+# Cloud Run: luister op $PORT en bind op 0.0.0.0
+CMD ["sh","-c","streamlit run dashboard.py --server.port=${PORT:-8080} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]
