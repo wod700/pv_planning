@@ -11,8 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app/
 
-EXPOSE 8080
-
 
 RUN mkdir -p /app/output/archive && chmod -R 777 /app/output
 
