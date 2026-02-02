@@ -22,9 +22,5 @@ RUN mkdir -p output/archive && chmod -R 777 output
 EXPOSE 8080
 
 # Dynamische poort + bind op alle interfaces
-CMD ["sh", "-c", "streamlit run dashboard.py \
-    --server.port=${PORT} \
-    --server.address=0.0.0.0 \
-    --server.headless=true \
-    --server.enableCORS=false \
-    --server.enableXsrfProtection=false"]
+CMD ["sh","-c","streamlit run dashboard.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"]
+
