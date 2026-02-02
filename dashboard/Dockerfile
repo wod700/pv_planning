@@ -14,4 +14,18 @@ COPY . /app/
 EXPOSE 8080
 
 
-CMD ["sh","-c","streamlit run dashboard.py --server.port=$PORT --server.address=0.0.0.0"]
+RUN mkdir -p /app/output/archive && chmod -R 777 /app/output
+
+# Headless matplotlib (vaak crash oorzaak in containers)
+ENV MPLBACKEND=Agg
+
+# Expose de poort die Cloud Run verwacht
+EXPOSE 8080
+
+# Dynamische poort: gebruik $PORT (Cloud Run zet dit op 8080), fallback naar 8501 lokaal
+CMD streamlit run dashboard.py \
+    --server.port=${PORT:-8501} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --server.enableCORS=false \
+    --server.enableXsrfProtection=false
