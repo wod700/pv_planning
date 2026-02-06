@@ -1,18 +1,18 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import os
 import json
-from google.cloud import storage
 import math
 import yaml
 import requests
 import datetime as dt
 import argparse
+from typing import Optional, Dict, Any, List, Tuple
 
 import matplotlib.pyplot as plt
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from typing import Optional, Dict, Any, List, Tuple
+# Google auth (ADC) for optional Calendar usage
+import google.auth
+from google.auth.exceptions import DefaultCredentialsError
 
 try:
     from zoneinfo import ZoneInfo  # Python 3.9+
@@ -21,38 +21,46 @@ except Exception:
 
 
 # ======================
-# CONFIG LADEN
+# CONFIG LADEN (cloud-friendly)
 # ======================
-#CONFIG_PATH = os.environ.get("PVPLANNING_CONFIG", "pvplanning.yaml")
+def load_config() -> Dict[str, Any]:
+    """
+    Ondersteunt 3 varianten:
+    1) PVPLANNING_CONFIG is pad naar een bestaand YAML bestand
+    2) PVPLANNING_CONFIG bevat YAML tekst (bijv. Secret Manager als env var)
+    3) fallback: local pvplanning.yaml in repo
+    """
+    env_val = os.environ.get("PVPLANNING_CONFIG")
 
-import yaml
+    # 1) env is file path
+    if env_val and os.path.exists(env_val):
+        with open(env_val, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
 
-def load_config():
-    path = os.environ.get("PVPLANNING_CONFIG")
-    if path and os.path.exists(path):
-        with open(path) as f:
-            return yaml.safe_load(f)
-    else:
-        with open("pvplanning.yaml") as f:
-            return yaml.safe_load(f)
+    # 2) env is yaml content
+    if env_val and isinstance(env_val, str) and env_val.strip().startswith(("{", "timezone:", "calendar_id:", "openweather:", "net:", "pv:", "locatie:")):
+        try:
+            return yaml.safe_load(env_val) or {}
+        except Exception:
+            # if it isn't valid yaml, fall through to file
+            pass
+
+    # 3) fallback file
+    with open("pvplanning.yaml", "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
 
 cfg = load_config()
 
-
 TIMEZONE = cfg.get("timezone", "Europe/Amsterdam")
 CALENDAR_ID = cfg.get("calendar_id", "primary")
-SERVICE_ACCOUNT_FILE = cfg.get("service_account_file", "service_account.json")
 
-
-
-# Output dirs
-OUTPUT_DIR = cfg.get("output_dir", "output")
+# Output dirs (respect PVPLANNING_BASE in Cloud Run)
+BASE_DIR = os.environ.get("PVPLANNING_BASE", ".")
+OUTPUT_DIR = os.path.join(BASE_DIR, cfg.get("output_dir", "output"))
 ARCHIVE_DIR = os.path.join(OUTPUT_DIR, "archive")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
-BASE_DIR = os.environ.get("PVPLANNING_BASE", ".")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-
 
 PLANNING_JSON = os.path.join(OUTPUT_DIR, "planning.json")
 STATE_JSON = os.path.join(OUTPUT_DIR, "state.json")
@@ -64,12 +72,12 @@ PV_KWP = (cfg["pv"]["panelen"] * cfg["pv"]["wp_per_paneel"] / 1000.0) * float(cf
 # Grafiek
 GRAFIEK_ACTIEF = bool(cfg.get("grafiek", {}).get("actief", True))
 GRAFIEK_BESTAND = cfg.get("grafiek", {}).get("bestand", "energieplanning_morgen.png")
+GRAFIEK_BESTAND = os.path.join(OUTPUT_DIR, os.path.basename(GRAFIEK_BESTAND))
 
 # Locatie & API keys
 LAT = float(cfg.get("locatie", {}).get("lat", 52.3489))
 LON = float(cfg.get("locatie", {}).get("lon", 5.3125))
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "") or cfg.get("openweather", {}).get("api_key", "")
-
 
 # Kosten
 NET_TARIEF_EUR_PER_KWH = float(cfg.get("kosten", {}).get("net_tarief_eur_per_kwh", 0.30))
@@ -148,13 +156,26 @@ def send_email_with_graph(subject: str, body: str, graph_path: str) -> None:
 
 
 # ======================
-# Google Calendar
+# Google Calendar (OPTIONEEL - GEEN service_account.json nodig)
 # ======================
+def calendar_enabled() -> bool:
+    cal_cfg = cfg.get("calendar", {}) or {}
+    return bool(cal_cfg.get("enabled", False))
+
+
 def calendar_service():
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
-        scopes=["https://www.googleapis.com/auth/calendar"],
-    )
+    """
+    Cloud-friendly:
+    - gebruikt Application Default Credentials (ADC)
+    - dus: Cloud Run Job Service Account + juiste rechten
+    - geen service_account.json bestand nodig
+    """
+    try:
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/calendar"])
+    except DefaultCredentialsError as e:
+        raise RuntimeError(f"Geen ADC credentials beschikbaar voor Calendar: {e}")
+
+    from googleapiclient.discovery import build
     return build("calendar", "v3", credentials=creds)
 
 
@@ -308,26 +329,11 @@ def openweather_hourly_weather_for_date(target_date: dt.date) -> Dict[str, Any]:
         Beaufort 0..12 op basis van m/s (WMO/KNMI grenzen).
         """
         v = float(ms)
-        # grenzen: ondergrens per bft; we bepalen de klasse waarin v valt
-        # 0: <0.5
-        # 1: 0.5–1.5
-        # 2: 1.6–3.3
-        # 3: 3.4–5.4
-        # 4: 5.5–7.9
-        # 5: 8.0–10.7
-        # 6: 10.8–13.8
-        # 7: 13.9–17.1
-        # 8: 17.2–20.7
-        # 9: 20.8–24.4
-        # 10: 24.5–28.4
-        # 11: 28.5–32.6
-        # 12: >=32.7
         bounds = [0.5, 1.6, 3.4, 5.5, 8.0, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7]
         for bft, upper in enumerate(bounds):
             if v < upper:
                 return bft
         return 12
-
 
     for hour in data.get("hourly", [])[:48]:
         ts = hour.get("dt")
@@ -834,6 +840,7 @@ def _weather_hour_dict_or_list(weather: Dict[str, Any], key: str) -> List[Option
     Maakt plotting robuust:
       - runtime: weather[key] is dict 0..23
       - saved json: weather[key+"_hourly"] is list 24
+      - legacy: weather[key] is list 24
     """
     if not isinstance(weather, dict):
         return [None] * 24
@@ -858,7 +865,6 @@ def _weather_hour_dict_or_list(weather: Dict[str, Any], key: str) -> List[Option
 
 def maak_grafiek_weer(weather: Dict[str, Any], dag: dt.date, bestand: str,
                       commute_start_h: int = 7, commute_end_h: int = 10) -> None:
-    # werkt zowel met runtime weather (dicts) als saved weather (lists)
     temp_list = _weather_hour_dict_or_list(weather, "temp_c")
     wind_list = _weather_hour_dict_or_list(weather, "wind_bft")
     rain_list = _weather_hour_dict_or_list(weather, "rain_mmph")
@@ -873,7 +879,6 @@ def maak_grafiek_weer(weather: Dict[str, Any], dag: dt.date, bestand: str,
     ax2 = ax.twinx()
     y_wind = [(float(v) if v is not None else float("nan")) for v in wind_list]
     ax2.plot(x, y_wind, linestyle="--", label="Wind (Bft)")
-
     ax2.bar(x, [float(v or 0.0) for v in rain_list], alpha=0.25, label="Regen (mm/u)")
 
     ax.axvspan(commute_start_h, commute_end_h, alpha=0.10)
@@ -973,29 +978,37 @@ def main() -> None:
         weer_png = os.path.join(OUTPUT_DIR, "weer_{}.png".format(dag_start.isoformat()))
         maak_grafiek_weer(weather, dag_start, weer_png)
 
-    # Calendar
-    service = calendar_service()
-    verwijder_events(service, rfc3339_dag_utc(dag_start), rfc3339_dag_utc(dag_start + dt.timedelta(days=1)))
+    # Calendar (optioneel)
+    if calendar_enabled():
+        try:
+            service = calendar_service()
+            verwijder_events(service, rfc3339_dag_utc(dag_start), rfc3339_dag_utc(dag_start + dt.timedelta(days=1)))
 
-    for item in planning:
-        if args.update and args.day == "today" and int(item.get("start_slot", 0)) < min_start_slot:
-            continue
+            for item in planning:
+                if args.update and args.day == "today" and int(item.get("start_slot", 0)) < min_start_slot:
+                    continue
 
-        start_dt = slot_to_datetime_local(dag_start, int(item["start_slot"]))
-        end_dt = slot_to_datetime_local(dag_start, int(item["start_slot"]) + int(item["slots"]))
+                start_dt = slot_to_datetime_local(dag_start, int(item["start_slot"]))
+                end_dt = slot_to_datetime_local(dag_start, int(item["start_slot"]) + int(item["slots"]))
 
-        extra = "PV-gestuurd (slot {}–{})".format(item["start_slot"], item["start_slot"] + item["slots"])
-        if item.get("cost_eur") is not None:
-            extra = "Geschatte kosten: €{:.2f}\n{}".format(float(item["cost_eur"]), extra)
+                extra = "PV-gestuurd (slot {}–{})".format(item["start_slot"], item["start_slot"] + item["slots"])
+                if item.get("cost_eur") is not None:
+                    extra = "Geschatte kosten: €{:.2f}\n{}".format(float(item["cost_eur"]), extra)
 
-        maak_event(
-            service=service,
-            naam=item["name"],
-            start_iso=start_dt.isoformat(),
-            end_iso=end_dt.isoformat(),
-            vermogen_kw=float(item["power_kw"]),
-            extra=extra,
-        )
+                maak_event(
+                    service=service,
+                    naam=item["name"],
+                    start_iso=start_dt.isoformat(),
+                    end_iso=end_dt.isoformat(),
+                    vermogen_kw=float(item["power_kw"]),
+                    extra=extra,
+                )
+
+            print("Calendar bijgewerkt.")
+        except Exception as e:
+            print(f"Calendar enabled maar faalde: {e}. Ga door zonder Calendar.")
+    else:
+        print("Calendar disabled (cfg.calendar.enabled=false).")
 
     print("Planning gemaakt voor {}. Taken: {}. Output: {}".format(dag_start, len(planning), PLANNING_JSON))
     for item in planning:
